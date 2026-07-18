@@ -4,7 +4,7 @@
   "description": "ВЕЧЕ — свободный мессенджер. Собрание, которое не разогнать.",
   "main": "server.js",
   "type": "commonjs",
-  "license": "AGPL-3.0-or-later",
+  "license": "MIT",
   "keywords": [
     "messenger",
     "chat",

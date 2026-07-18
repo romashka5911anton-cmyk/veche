@@ -1,0 +1,35 @@
+{
+  "name": "veche",
+  "version": "1.0.0",
+  "description": "ВЕЧЕ — свободный мессенджер. Собрание, которое не разогнать.",
+  "main": "server.js",
+  "type": "commonjs",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "messenger",
+    "chat",
+    "self-hosted",
+    "socket.io",
+    "webrtc",
+    "pwa",
+    "privacy",
+    "veche"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "icons": "node tools/gen-icons.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/romashka5911anton-cmyk/veche"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "web-push": "^3.6.7"
+  }
+}

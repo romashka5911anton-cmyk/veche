@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#06080e" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="description" content="ВЕЧЕ — свободный мессенджер. Собрание, которое не разогнать." />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' blob: data: https:; media-src 'self' blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; base-uri 'self'; form-action 'self';" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="ВЕЧЕ" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+  <link rel="stylesheet" href="/style.css" />
+  <title>ВЕЧЕ</title>
+</head>
+<body>
+  <!-- Живой фон-аврора -->
+  <div class="aurora-layer"><div class="aurora-orb-3"></div></div>
+
+  <!-- ============================================================
+       ЭКРАН ВХОДА / РЕГИСТРАЦИИ
+       ============================================================ -->
+  <div id="auth-screen">
+    <div class="auth-blobs">
+      <div class="blob blob-1"></div>
+      <div class="blob blob-2"></div>
+      <div class="blob blob-3"></div>
+    </div>
+    <form id="auth-form" class="auth-card" autocomplete="off">
+      <div class="logo">
+        <div class="logo-mark">ВЕЧЕ</div>
+        <div class="logo-sub">собрание<span class="dot">,</span> которое не разогнать</div>
+      </div>
+      <div class="auth-tabs">
+        <button type="button" id="tab-login" class="tab active">Вход</button>
+        <button type="button" id="tab-register" class="tab">Регистрация</button>
+      </div>
+      <div class="field">
+        <input id="auth-username" type="text" placeholder=" " autocomplete="username"
+               maxlength="24" autocapitalize="none" spellcheck="false" />
+        <label>Никнейм (латиница, цифры, _)</label>
+      </div>
+      <div class="field">
+        <input id="auth-password" type="password" placeholder=" " autocomplete="current-password" />
+        <label>Пароль</label>
+      </div>
+      <div id="auth-error" class="auth-error"></div>
+      <button type="submit" id="auth-submit" class="btn-primary">Войти</button>
+      <div class="auth-footer">⬡ · ВЕЧЕ · ⬡</div>
+    </form>
+  </div>
+
+  <!-- ============================================================
+       ОСНОВНОЙ ЭКРАН
+       ============================================================ -->
+  <div id="app-screen" class="hidden">
+
+    <!-- ── Боковая панель: список чатов ── -->
+    <aside id="sidebar">
+      <header class="sidebar-header">
+        <div id="me-avatar" class="me-avatar" title="Профиль и настройки"></div>
+        <div class="sidebar-brand">ВЕЧЕ</div>
+        <button id="btn-feed" class="icon-btn" title="Лента">📰</button>
+        <button id="btn-new" class="icon-btn" title="Новая группа или канал">＋</button>
+        <button id="btn-admin" class="icon-btn hidden" title="Модерация">🛡</button>
+        <button id="btn-settings" class="icon-btn" title="Настройки">⚙️</button>
+      </header>
+      <div class="search-wrap">
+        <input id="search" type="search" placeholder="Поиск людей и чатов…" autocomplete="off" />
+      </div>
+      <div id="chat-list"></div>
+    </aside>
+
+    <!-- ── Панель переписки ── -->
+    <main id="chat-pane">
+
+      <!-- Пустое состояние -->
+      <div id="chat-empty">
+        <div class="empty-logo">ВЕЧЕ</div>
+        <div class="empty-hint">
+          <p>Выбери разговор слева или найди человека через поиск.<br>Здесь тихо, пока ты не начнёшь.</p>
+        </div>
+      </div>
+
+      <!-- Активный чат -->
+      <div id="chat-view" class="hidden">
+        <header id="chat-header">
+          <button id="btn-back" title="Назад">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
+          <div id="chat-avatar" class="chat-header-avatar"></div>
+          <div id="chat-header-info" class="chat-header-info">
+            <div id="chat-title"></div>
+            <div id="chat-status"></div>
+          </div>
+          <button id="btn-call" class="icon-btn" title="Позвонить" style="display:none">📞</button>
+          <button id="btn-secret" class="icon-btn" title="Секретный чат" style="display:none">🔓</button>
+          <button id="btn-mute" class="icon-btn" title="Уведомления">🔔</button>
+          <button id="btn-chat-menu" class="icon-btn" title="Информация">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+          </button>
+        </header>
+
+        <!-- Закреплённое сообщение -->
+        <div id="pinned-bar" class="hidden">
+          <span class="pin-icon">📌</span>
+          <div class="pin-body">
+            <div class="pin-label">Закреплено</div>
+            <div id="pin-text"></div>
+          </div>
+          <button id="pin-close" class="icon-btn" title="Открепить">✕</button>
+        </div>
+
+        <!-- Лента сообщений -->
+        <div id="messages"></div>
+
+        <!-- Ответ / редактирование -->
+        <div id="reply-bar" class="hidden">
+          <div class="reply-accent"></div>
+          <div class="reply-body">
+            <div id="reply-title" class="reply-title"></div>
+            <div id="reply-text" class="reply-text"></div>
+          </div>
+          <button id="reply-cancel" class="icon-btn" title="Отмена">✕</button>
+        </div>
+
+        <!-- Строка ввода -->
+        <div id="composer">
+          <button id="btn-attach" class="comp-btn" title="Вложение">
+            <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </button>
+          <button id="btn-emoji" class="comp-btn" title="Эмодзи">
+            <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+          </button>
+          <textarea id="msg-input" rows="1" placeholder="Сообщение…"></textarea>
+          <button id="btn-send" class="comp-btn send hidden" title="Отправить">
+            <svg viewBox="0 0 24 24" width="21" height="21" fill="currentColor"><path d="M3.4 20.4 21 12 3.4 3.6 3 10l12 2-12 2z"/></svg>
+          </button>
+          <button id="btn-mic" class="comp-btn" title="Голосовое">
+            <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+          </button>
+          <button id="btn-circle" class="comp-btn" title="Видео-кружок">
+            <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m23 7-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+          </button>
+        </div>
+
+        <!-- Запись голосового -->
+        <div id="rec-bar" class="hidden">
+          <button id="rec-cancel" class="icon-btn-lg" title="Отмена">🗑</button>
+          <span class="rec-dot"></span>
+          <span id="rec-time">0:00</span>
+          <span class="rec-hint">Идёт запись…</span>
+          <button id="rec-send" class="icon-btn-lg send" title="Отправить">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3.4 20.4 21 12 3.4 3.6 3 10l12 2-12 2z"/></svg>
+          </button>
+        </div>
+
+        <!-- Меню вложений -->
+        <div id="attach-menu" class="popup hidden">
+          <button data-act="photo"><span class="ai" style="background:rgba(124,95,245,.18)">🖼</span> Фото / альбом</button>
+          <button data-act="file"><span class="ai" style="background:rgba(34,211,238,.18)">📎</span> Файл</button>
+          <button data-act="geo"><span class="ai" style="background:rgba(40,224,144,.18)">📍</span> Геолокация</button>
+          <button data-act="poll"><span class="ai" style="background:rgba(255,202,87,.18)">📊</span> Опрос «Сходка»</button>
+          <button data-act="game"><span class="ai" style="background:rgba(244,114,182,.18)">🎮</span> Игра</button>
+          <button data-act="timed"><span class="ai" style="background:rgba(80,128,247,.18)">⏱</span> По таймеру</button>
+          <button data-act="burn"><span class="ai" style="background:rgba(240,65,92,.18)">🔥</span> Исчезающее</button>
+        </div>
+
+        <!-- Панель эмодзи -->
+        <div id="emoji-panel" class="hidden">
+          <div id="emoji-tabs"></div>
+          <div id="emoji-grid"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ============================================================
+       КОНТЕКСТ-МЕНЮ СООБЩЕНИЯ
+       ============================================================ -->
+  <div id="msg-menu" class="ctx-menu hidden">
+    <div id="ctx-reactions" class="ctx-reactions"></div>
+    <button data-act="reply">↩️ Ответить</button>
+    <button data-act="forward">⤴️ Переслать</button>
+    <button data-act="copy">📋 Копировать</button>
+    <button data-act="pin">📌 Закрепить</button>
+    <button data-act="edit">✏️ Изменить</button>
+    <button data-act="report">⚠️ Пожаловаться</button>
+    <button data-act="delete" class="danger">🗑 Удалить у всех</button>
+    <button data-act="adminDelete" class="danger">🛡 Удалить (модератор)</button>
+  </div>
+
+  <!-- ============================================================
+       МОДАЛКИ
+       ============================================================ -->
+
+  <!-- Выбор типа: группа / канал -->
+  <div id="new-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">Создать<button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body">
+        <div class="new-grid">
+          <button class="new-opt" data-new="group"><span class="ai">👥</span>Группа</button>
+          <button class="new-opt" data-new="channel"><span class="ai">📣</span>Канал</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Создание группы/канала -->
+  <div id="create-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head"><span id="create-title">Новая группа</span><button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body">
+        <div class="field"><input id="create-name" type="text" placeholder=" " maxlength="48" /><label>Название</label></div>
+        <div class="field"><textarea id="create-desc" rows="2" placeholder=" " maxlength="200"></textarea><label>Описание (необязательно)</label></div>
+        <div class="picker-label">Участники</div>
+        <input id="member-search" class="member-search" type="text" placeholder="Поиск людей…" autocomplete="off" />
+        <div id="member-list" class="member-list"></div>
+        <div id="create-error" class="auth-error"></div>
+        <button id="create-go" class="btn-primary">Создать</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Информация о группе/канале -->
+  <div id="chatinfo-modal" class="modal-overlay hidden">
+    <div class="modal modal-tall">
+      <div class="modal-head"><span id="ci-head">Группа</span><button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body">
+        <div class="ci-avatar-wrap">
+          <div id="ci-avatar" class="profile-avatar"></div>
+          <button id="ci-avatar-edit" class="avatar-edit hidden" title="Сменить фото">✎</button>
+        </div>
+        <div id="ci-title" class="ci-title"></div>
+        <div id="ci-sub" class="ci-sub"></div>
+        <div class="ci-actions">
+          <button id="ci-add" class="ci-act">＋ Добавить участников</button>
+        </div>
+        <div id="ci-edit-block" class="ci-edit hidden">
+          <div class="field"><input id="ci-name" type="text" placeholder=" " maxlength="48" /><label>Название</label></div>
+          <div class="field"><textarea id="ci-desc" rows="2" placeholder=" " maxlength="200"></textarea><label>Описание</label></div>
+          <button id="ci-save" class="btn-ghost">Сохранить</button>
+        </div>
+        <div class="picker-label">Участники</div>
+        <div id="ci-members" class="member-list tall"></div>
+        <button id="ci-leave" class="btn-ghost danger">Выйти из чата</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Профиль (просмотр) -->
+  <div id="profile-modal" class="modal-overlay hidden">
+    <div class="modal modal-tall">
+      <div class="modal-head"><span id="profile-modal-title">Профиль</span><button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body profile-body">
+        <div id="pv-photos"></div>
+        <div id="pv-name" class="profile-name"></div>
+        <div id="pv-username" class="profile-username"></div>
+        <div id="pv-bio" class="profile-bio"></div>
+        <div id="pv-tg" class="profile-tg hidden"></div>
+        <div id="pv-phone" class="profile-line hidden"></div>
+        <div id="pv-closed" class="profile-closed hidden">🔒 Закрытый профиль — пишет только тому, кого знает.</div>
+        <button id="pv-message" class="btn-primary">Написать</button>
+        <button id="pv-wall-btn" class="btn-ghost">📖 Стена</button>
+        <div id="pv-wall" class="wall hidden"></div>
+        <button id="pv-block" class="btn-ghost danger">Заблокировать</button>
+        <button id="pv-report" class="btn-ghost">⚠️ Пожаловаться</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Настройки -->
+  <div id="settings-modal" class="modal-overlay hidden">
+    <div class="modal modal-tall">
+      <div class="modal-head">Настройки<button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body">
+        <div id="set-photos" class="profile-photos"></div>
+        <button id="set-add-photo" class="add-photo-btn">＋ Добавить фото</button>
+
+        <div class="field"><input id="set-name" type="text" placeholder=" " maxlength="24" /><label>Имя</label></div>
+        <div class="field readonly"><input id="set-username" type="text" placeholder=" " readonly /><label>Никнейм</label></div>
+        <div class="field"><textarea id="set-bio" rows="2" placeholder=" " maxlength="140"></textarea><label>О себе</label></div>
+        <div class="field"><input id="set-status" type="text" placeholder=" " maxlength="40" /><label>Свой статус (вместо «в сети»)</label></div>
+
+        <div class="set-section">Контакты</div>
+        <div class="field"><input id="set-phone" type="tel" placeholder=" " maxlength="24" /><label>Телефон</label></div>
+        <div class="field"><input id="set-tg" type="text" placeholder=" " maxlength="32" autocapitalize="none" /><label>Telegram (без @)</label></div>
+        <div class="field"><input id="set-email" type="email" placeholder=" " maxlength="64" autocapitalize="none" /><label>Email</label></div>
+
+        <div class="set-section">Приватность</div>
+        <label class="toggle-row ghost-toggle"><span>👻 Режим «Призрак»<small>Невидимость: тебя не найти по нику, видят только знакомые</small></span><input id="set-ghost" type="checkbox" /></label>
+        <label class="toggle-row"><span>🔒 Закрытый профиль<small>Незнакомые не могут написать первыми</small></span><input id="set-closed" type="checkbox" /></label>
+        <label class="toggle-row"><span>📞 Показывать телефон<small>Виден в твоём профиле</small></span><input id="set-showphone" type="checkbox" /></label>
+        <label class="toggle-row"><span>👁 Скрыть «в сети»<small>Никто не видит твой статус и последний визит</small></span><input id="set-hideonline" type="checkbox" /></label>
+        <label class="toggle-row"><span>🔕 Новые чаты без звука<small>Уведомления off по умолчанию</small></span><input id="set-mutenew" type="checkbox" /></label>
+        <label class="toggle-row"><span>📡 Скрыть «Эфир»<small>Убрать общий канал из списка</small></span><input id="set-hideefir" type="checkbox" /></label>
+        <label class="toggle-row"><span>🔔 Push-уведомления<small>Сообщения и звонки, когда вкладка закрыта</small></span><input id="set-push" type="checkbox" /></label>
+
+        <div class="set-section">Смена пароля</div>
+        <div class="field"><input id="set-pass-cur" type="password" placeholder=" " autocomplete="current-password" /><label>Текущий пароль</label></div>
+        <div class="field"><input id="set-pass-new" type="password" placeholder=" " autocomplete="new-password" /><label>Новый пароль</label></div>
+        <button id="set-pass-save" class="btn-ghost">Изменить пароль</button>
+
+        <div id="set-msg" class="set-msg"></div>
+        <button id="set-save" class="btn-primary">Сохранить</button>
+        <button id="set-help" class="btn-ghost">❔ Как пользоваться</button>
+        <button id="set-logout" class="btn-ghost danger">Выйти из аккаунта</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Пересылка -->
+  <div id="forward-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">Переслать<button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body">
+        <input id="forward-search" class="member-search" type="text" placeholder="Кому переслать…" autocomplete="off" />
+        <div id="forward-list" class="member-list tall"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Лента -->
+  <div id="feed-modal" class="modal-overlay hidden">
+    <div class="modal feed-modal">
+      <div class="modal-head">📰 Лента<button id="feed-new" class="ci-act" style="width:auto;padding:6px 14px;margin-right:8px">✎ Пост</button><button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body"><div id="feed-list"></div></div>
+    </div>
+  </div>
+
+  <!-- Новый пост -->
+  <div id="post-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">Новый пост<button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body">
+        <div class="field"><textarea id="post-text" rows="4" placeholder=" " maxlength="1000"></textarea><label>Что нового?</label></div>
+        <div id="post-photos"></div>
+        <button id="post-add-photo" class="add-photo-btn">＋ Добавить фото</button>
+        <div id="post-error" class="auth-error"></div>
+        <button id="post-go" class="btn-primary">Опубликовать</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Опрос -->
+  <div id="poll-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">📊 Опрос «Сходка»<button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body">
+        <div class="field"><input id="poll-q" type="text" placeholder=" " maxlength="200" /><label>Вопрос</label></div>
+        <div id="poll-opts"></div>
+        <button id="poll-add-opt" class="btn-ghost">＋ Ещё вариант</button>
+        <div id="poll-error" class="auth-error"></div>
+        <button id="poll-go" class="btn-primary">Создать опрос</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Игра -->
+  <div id="game-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">🎮 Игра<button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body">
+        <div class="game-grid">
+          <button class="game-opt sel" data-game="ttt"><span class="go-ic">⭕</span>Крестики-нолики</button>
+          <button class="game-opt" data-game="c4"><span class="go-ic">🔴</span>4 в ряд</button>
+          <button class="game-opt" data-game="rps"><span class="go-ic">✊</span>Камень-ножницы</button>
+          <button class="game-opt" data-game="dice"><span class="go-ic">🎲</span>Кости</button>
+        </div>
+        <div class="picker-label">До скольких побед</div>
+        <div class="wins-row">
+          <button class="wins-opt sel" data-wins="1">1</button>
+          <button class="wins-opt" data-wins="2">2</button>
+          <button class="wins-opt" data-wins="3">3</button>
+          <button class="wins-opt" data-wins="5">5</button>
+        </div>
+        <button id="game-go" class="btn-primary">Начать игру</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- По таймеру -->
+  <div id="timed-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">⏱ Отправить позже<button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body">
+        <div class="timed-hint">Сообщение уйдёт само в выбранное время — даже если тебя нет в сети.</div>
+        <div class="timed-quick">
+          <button data-min="5">через 5 мин</button>
+          <button data-min="30">через 30 мин</button>
+          <button data-min="60">через час</button>
+          <button data-min="180">через 3 часа</button>
+          <button data-min="1440">завтра</button>
+        </div>
+        <div class="field"><input id="timed-at" type="datetime-local" placeholder=" " /><label>Точное время</label></div>
+        <button id="timed-go" class="btn-primary">Запланировать</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Секретный чат (E2E) -->
+  <div id="secret-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">🔒 Секретный чат<button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body">
+        <p style="font-size:13.5px;color:var(--text-dim);line-height:1.6;margin-bottom:6px">
+          В секретном чате сообщения шифруются <b>на твоём устройстве</b> и расшифровываются только у собеседника.
+          Сервер (и тот, кто им владеет) хранит лишь шифр и прочитать переписку <b>не может</b>.
+        </p>
+        <label class="toggle-row ghost-toggle">
+          <span>Сквозное шифрование<small id="secret-hint">Шифровать сообщения в этом чате</small></span>
+          <input id="secret-toggle" type="checkbox" />
+        </label>
+        <div id="secret-verify" class="hidden">
+          <div class="set-section">Код сверки</div>
+          <p style="font-size:12.5px;color:var(--text-dim);line-height:1.55;margin-bottom:8px">
+            Сверьте эти числа с собеседником лично или по другому каналу. Совпали — значит между вами нет посредника.
+          </p>
+          <div id="secret-sn" style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:15px;letter-spacing:1px;
+            text-align:center;line-height:1.9;padding:14px;border-radius:14px;background:rgba(124,95,245,.1);
+            border:1px solid rgba(124,95,245,.22);white-space:pre;font-variant-numeric:tabular-nums"></div>
+        </div>
+        <p style="font-size:11.5px;color:var(--text-faint);line-height:1.5;margin-top:14px">
+          Шифруется текст личных сообщений. Группы, «Эфир» и ассистент — не секретные. Скрывается содержимое,
+          но не сам факт переписки. Ключ хранится только на этом устройстве.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модерация -->
+  <div id="admin-modal" class="modal-overlay hidden">
+    <div class="modal modal-tall">
+      <div class="modal-head">🛡 Модерация<button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body"><div id="admin-body"></div></div>
+    </div>
+  </div>
+
+  <!-- Справка -->
+  <div id="help-modal" class="modal-overlay hidden">
+    <div class="modal modal-tall">
+      <div class="modal-head">❔ Как пользоваться<button class="modal-close" data-close>✕</button></div>
+      <div class="modal-body"><div id="help-body"></div></div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       ПОЛНОЭКРАННЫЕ СЛОИ
+       ============================================================ -->
+
+  <!-- Запись видео-кружка -->
+  <div id="circle-modal" class="hidden">
+    <div class="circle-stage">
+      <video id="circle-preview" autoplay muted playsinline></video>
+      <div class="circle-ring"></div>
+      <button id="circle-flip" title="Сменить камеру">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      </button>
+    </div>
+    <div id="circle-timer">0:00</div>
+    <div class="circle-controls">
+      <button id="circle-cancel" class="icon-btn-lg" title="Отмена">✕</button>
+      <button id="circle-rec" class="circle-rec-btn" title="Запись"></button>
+      <button id="circle-send" class="icon-btn-lg send hidden" title="Отправить">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3.4 20.4 21 12 3.4 3.6 3 10l12 2-12 2z"/></svg>
+      </button>
+    </div>
+    <div class="circle-hint">Нажми круг — запись начнётся. До 60 секунд.</div>
+  </div>
+
+  <!-- Звонок -->
+  <div id="call-screen" class="hidden">
+    <div class="call-bg"></div>
+    <div class="call-inner">
+      <div id="call-avatar" class="call-avatar"></div>
+      <div id="call-name" class="call-name"></div>
+      <div id="call-status" class="call-status"></div>
+      <div id="call-incoming-controls" class="call-incoming-controls hidden">
+        <button id="call-decline" class="call-btn decline" title="Отклонить">📵</button>
+        <button id="call-accept" class="call-btn accept" title="Ответить">📞</button>
+      </div>
+      <div id="call-controls" class="call-controls hidden">
+        <button id="call-mute" class="call-btn mute" title="Микрофон">🎤</button>
+        <button id="call-speaker" class="call-btn speaker" title="Динамик">🔊</button>
+        <button id="call-hang" class="call-btn hang" title="Завершить">📵</button>
+      </div>
+    </div>
+    <audio id="remote-audio" autoplay></audio>
+  </div>
+
+  <!-- Лайтбокс -->
+  <div id="lightbox" class="hidden"><img id="lightbox-img" alt="" /></div>
+
+  <!-- Тост -->
+  <div id="toast" class="hidden"></div>
+
+  <!-- Скрытые файловые поля -->
+  <input id="avatar-input" type="file" accept="image/*" class="hidden" />
+  <input id="file-photo" type="file" accept="image/*" multiple class="hidden" />
+  <input id="file-any" type="file" class="hidden" />
+  <input id="post-photo-input" type="file" accept="image/*" multiple class="hidden" />
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/emoji.js"></script>
+  <script src="/crypto.js"></script>
+  <script src="/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+    }
+  </script>
+</body>
+</html>

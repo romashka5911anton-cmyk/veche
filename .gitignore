@@ -1,0 +1,29 @@
+# зависимости
+node_modules/
+
+# данные и загрузки конкретной инсталляции — НЕ коммитим
+data.json
+data.json.bak
+uploads/
+mobile-crash.log
+
+# секреты
+.env
+*.pem
+*.key
+
+# системное
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+
+# редакторы и локальные инструменты
+.vscode/
+.idea/
+.claude/
+*.swp
+
+# локальный бэкап старой версии — не для публикации
+public.backup-liquid-glass/
+app-latest.json

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'veche-web-v5';
+const CACHE_NAME = 'veche-web-v6';
 
 self.addEventListener('install', (e) => {
   e.waitUntil(

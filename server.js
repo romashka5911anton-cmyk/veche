@@ -39,8 +39,10 @@ let webpush; try { webpush = require('web-push'); } catch { console.warn('web-pu
 })();
 
 const PORT = process.env.PORT || 4040;
-const DATA_FILE = path.join(__dirname, 'data.json');
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
+// DATA_DIR — где лежат база и загрузки (по умолчанию рядом с server.js). Удобно для Docker-тома и тестов.
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : __dirname;
+const DATA_FILE = path.join(DATA_DIR, 'data.json');
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const EFIR = 'efir';
 
 // TURN/STUN для звонков (на проде задаются через окружение в systemd)
@@ -76,7 +78,10 @@ try {
     db = Object.assign({ users: [], messages: [], chats: [], scheduled: [], posts: [], reports: [], pushSubs: {}, reminders: [], vapid: null }, loaded);
   }
 } catch (e) {
-  console.error('data.json повреждён, начинаю с чистого листа:', e.message);
+  // Не затираем повреждённую базу молча: откладываем её в сторону, чтобы данные можно было восстановить руками.
+  const aside = DATA_FILE + '.corrupt-' + Date.now();
+  try { fs.renameSync(DATA_FILE, aside); } catch {}
+  console.error(`data.json повреждён (${e.message}). Файл сохранён как ${path.basename(aside)}, начинаю с чистого листа.`);
 }
 // миграция старых юзеров до новой схемы
 for (const u of db.users) {
@@ -89,11 +94,19 @@ for (const u of db.users) {
   if (!u.muted) u.muted = [];
 }
 
+// Атомарная запись базы: пишем во временный файл и переименовываем.
+// Если процесс упадёт посреди записи, data.json останется целым (старая версия).
+function writeDbSync() {
+  const tmp = DATA_FILE + '.tmp';
+  try { fs.writeFileSync(tmp, JSON.stringify(db)); fs.renameSync(tmp, DATA_FILE); }
+  catch (e) { console.error('save:', e.message); }
+}
+
 // ---------- Web Push (VAPID) ----------
 if (webpush) {
   if (!db.vapid) {
     db.vapid = webpush.generateVAPIDKeys();
-    try { fs.writeFileSync(DATA_FILE, JSON.stringify(db)); } catch {}
+    writeDbSync();
     console.log('🔑 VAPID ключи сгенерированы');
   }
   webpush.setVapidDetails('mailto:admin@veche.app', db.vapid.publicKey, db.vapid.privateKey);
@@ -161,7 +174,7 @@ if (!ALISA) {
   bootDirty = true;
 } else { ALISA.isBot = true; ALISA.customStatus = '✨ ИИ-ассистент · YandexGPT'; }
 // разовое сохранение на старте (save() ещё в TDZ, пишем напрямую)
-if (bootDirty) { try { fs.writeFileSync(DATA_FILE, JSON.stringify(db)); } catch {} }
+if (bootDirty) writeDbSync();
 
 // ---------- YandexGPT: запрос к модели ----------
 const ALISA_SYSTEM = 'Ты — Алиса, дружелюбный ИИ-ассистент внутри мессенджера ВЕЧЕ. Отвечай по-русски, тепло и по делу, без воды. Если просят код или факты — будь точной. Если чего-то не знаешь — честно скажи. Пиши коротко, как в мессенджере.';
@@ -343,8 +356,8 @@ async function notifyOffline(msg, sender) {
   if (chatId === EFIR) {
     recipients = db.users.map((u) => u.id).filter((id) => id !== sender.id && id !== ALISA.id);
   } else if (chatId.startsWith('dm:')) {
-    const [, a, b] = chatId.split(':');
-    recipients = [a === sender.id ? b : a];
+    const peer = dmPeer(chatId, sender.id);
+    recipients = peer === sender.id ? [] : [peer];
   } else {
     const chat = findChat(chatId);
     if (!chat) return;
@@ -389,17 +402,38 @@ setInterval(async () => {
   save();
 }, 10000);
 
-let saveTimer = null;
+let saveTimer = null, saving = false, saveAgain = false;
 function save() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    fs.writeFile(DATA_FILE, JSON.stringify(db), (err) => { if (err) console.error('save:', err.message); });
-  }, 250);
+  saveTimer = setTimeout(flushSave, 250);
+}
+function flushSave() {
+  saveTimer = null;
+  if (saving) { saveAgain = true; return; }
+  saving = true;
+  const tmp = DATA_FILE + '.tmp';
+  fs.writeFile(tmp, JSON.stringify(db), (err) => {
+    if (err) { console.error('save:', err.message); saving = false; return; }
+    fs.rename(tmp, DATA_FILE, (err2) => {
+      if (err2) console.error('save:', err2.message);
+      saving = false;
+      if (saveAgain) { saveAgain = false; flushSave(); }
+    });
+  });
+}
+// при остановке (Ctrl+C, systemd stop, docker stop) — дописываем несохранённое
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => { clearTimeout(saveTimer); writeDbSync(); process.exit(0); });
 }
 
 // ---------- утилиты ----------
 const uid = () => crypto.randomBytes(8).toString('hex');
 const hashPass = (p, s) => crypto.scryptSync(p, s, 64).toString('hex');
+// сравнение хэшей за постоянное время (не даём подбирать пароль по времени ответа)
+function passOk(user, password) {
+  if (!user || !user.salt || !user.passHash || user.passHash.length !== 128) return false;
+  return crypto.timingSafeEqual(Buffer.from(hashPass(password, user.salt), 'hex'), Buffer.from(user.passHash, 'hex'));
+}
 const sanitize = (s, n) => String(s == null ? '' : s).trim().slice(0, n);
 
 const PALETTES = [
@@ -507,18 +541,42 @@ function isSuperAdmin(u) { return u && (ADMIN_USERNAMES.includes(u.username) || 
 // нет ли уже живого админа (человека)? — чтобы назначить первого пользователя
 function hasHumanAdmin() { return db.users.some((u) => !u.isBot && isSuperAdmin(u)); }
 
+// Приводит chatId от клиента к каноничному виду или возвращает null.
+// ЛС всегда 'dm:<меньший id>:<больший id>', причём один из них — сам пользователь, а второй существует.
+// Раньше проверка была через includes(), и можно было слать «личку» в произвольную комнату (например, во весь Эфир).
+function normChatId(me, chatId) {
+  if (typeof chatId !== 'string' || !chatId || chatId.length > 80) return null;
+  if (chatId === EFIR) return EFIR;
+  if (chatId.startsWith('peer:')) chatId = 'dm:' + chatId.slice(5);
+  if (chatId.startsWith('dm:')) {
+    const parts = chatId.slice(3).split(':');
+    let peer = null;
+    if (parts.length === 1) peer = parts[0];
+    else if (parts.length === 2 && parts[0] === me.id) peer = parts[1];
+    else if (parts.length === 2 && parts[1] === me.id) peer = parts[0];
+    if (!peer || !findUser(peer)) return null;
+    return dmId(me.id, peer);
+  }
+  return /^(grp|chn):[a-f0-9]{16}$/.test(chatId) ? chatId : null;
+}
+const dmParts = (chatId) => { const p = chatId.split(':'); return p.length === 3 ? [p[1], p[2]] : [null, null]; };
+const dmPeer = (chatId, meId) => { const [a, b] = dmParts(chatId); return a === meId ? b : a; };
+const isUserId = (id) => typeof id === 'string' && id !== EFIR && !!findUser(id);
+
 // членство в чате
 function canSee(user, chatId) {
+  if (typeof chatId !== 'string') return false;
   if (chatId === EFIR) return true;
-  if (chatId.startsWith('dm:')) return chatId.includes(user.id);
+  if (chatId.startsWith('dm:')) { const [a, b] = dmParts(chatId); return a === user.id || b === user.id; }
   const c = findChat(chatId);
   if (!c) return false;
   if (c.type === 'channel') return c.members.includes(user.id) || c.subscribers.includes(user.id);
   return c.members.includes(user.id);
 }
 function canSend(user, chatId) {
+  if (typeof chatId !== 'string') return false;
   if (chatId === EFIR) return true;
-  if (chatId.startsWith('dm:')) return chatId.includes(user.id);
+  if (chatId.startsWith('dm:')) return canSee(user, chatId);
   const c = findChat(chatId);
   if (!c) return false;
   if (c.type === 'channel') return c.admins.includes(user.id) || c.owner === user.id;
@@ -604,7 +662,7 @@ app.post('/api/login', (req, res) => {
   const username = sanitize(req.body.username, 24).toLowerCase();
   const password = String(req.body.password || '');
   const user = db.users.find((u) => u.username === username);
-  if (!user || hashPass(password, user.salt) !== user.passHash)
+  if (!user || !passOk(user, password))
     return res.status(401).json({ error: 'Неверный юзернейм или пароль' });
   if (user.banned) return res.status(403).json({ error: 'Аккаунт заблокирован за нарушение правил' });
   user.token = crypto.randomBytes(24).toString('hex');
@@ -657,7 +715,7 @@ app.post('/api/password', (req, res) => {
   const user = userByToken(req);
   if (!user) return res.status(401).json({ error: 'unauthorized' });
   const cur = String(req.body.current || ''), next = String(req.body.next || '');
-  if (hashPass(cur, user.salt) !== user.passHash) return res.status(403).json({ error: 'Текущий пароль неверный' });
+  if (!passOk(user, cur)) return res.status(403).json({ error: 'Текущий пароль неверный' });
   if (next.length < 4) return res.status(400).json({ error: 'Новый пароль: минимум 4 символа' });
   user.salt = crypto.randomBytes(16).toString('hex');
   user.passHash = hashPass(next, user.salt);
@@ -672,9 +730,12 @@ app.post('/api/upload',
   (req, res) => {
     const user = userByToken(req);
     if (!user) return res.status(401).json({ error: 'unauthorized' });
+    if (user.banned) return res.status(403).json({ error: 'Аккаунт заблокирован' });
+    if (!rateLimit(user.id, 'upload', 60, 10 * 60000)) return res.status(429).json({ error: 'Слишком много загрузок — подождите' });
     if (!req.body || !req.body.length) return res.status(400).json({ error: 'Пусто' });
     const mime = (req.headers['content-type'] || 'application/octet-stream').split(';')[0].trim();
-    const origName = sanitize(decodeURIComponent(req.headers['x-filename'] || ''), 120);
+    let origName = '';
+    try { origName = sanitize(decodeURIComponent(req.headers['x-filename'] || ''), 120); } catch { origName = ''; }
     let ext = '';
     const m = origName.match(/\.[a-z0-9]{1,8}$/i);
     if (m) ext = m[0];
@@ -694,6 +755,7 @@ app.post('/api/upload',
 // лог падений мобильного клиента (необработанные исключения) — «чёрный ящик».
 // Пишем построчно JSON в mobile-crash.log, файл не даём разрастаться больше 1МБ.
 app.post('/api/mobile-log', (req, res) => {
+  if (!rateLimit(req.ip, 'mlog', 20, 60000)) return res.status(429).json({ error: 'rate' });
   try {
     const b = req.body || {};
     const line = JSON.stringify({
@@ -704,7 +766,7 @@ app.post('/api/mobile-log', (req, res) => {
       error: String(b.error || '').slice(0, 300),
       stack: String(b.stack || '').slice(0, 4000),
     }) + '\n';
-    const file = path.join(__dirname, 'mobile-crash.log');
+    const file = path.join(DATA_DIR, 'mobile-crash.log');
     try { if (fs.existsSync(file) && fs.statSync(file).size > 1024 * 1024) fs.writeFileSync(file, ''); } catch (_) {}
     fs.appendFileSync(file, line);
   } catch (_) {}
@@ -716,14 +778,16 @@ app.post('/api/mobile-log', (req, res) => {
 // Защита от SSRF: только http/https и только публичные адреса (не локальная сеть/облачные метаданные).
 const linkCache = new Map(); // url -> { data, exp }
 function isPrivateIp(ip) {
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);   // IPv4, завёрнутый в IPv6
+  if (mapped) ip = mapped[1];
   if (net.isIPv4(ip)) {
     const p = ip.split('.').map(Number);
     return p[0] === 10 || p[0] === 127 || p[0] === 0 || (p[0] === 169 && p[1] === 254) ||
       (p[0] === 172 && p[1] >= 16 && p[1] <= 31) || (p[0] === 192 && p[1] === 168) ||
-      (p[0] === 100 && p[1] >= 64 && p[1] <= 127);
+      (p[0] === 100 && p[1] >= 64 && p[1] <= 127) || p[0] >= 224 || (p[0] === 198 && (p[1] === 18 || p[1] === 19));
   }
   const l = ip.toLowerCase();
-  return l === '::1' || l === '::' || l.startsWith('fe80') || l.startsWith('fc') || l.startsWith('fd') || l.startsWith('::ffff:127.') || l.startsWith('::ffff:10.') || l.startsWith('::ffff:192.168.');
+  return l === '::1' || l === '::' || l.startsWith('fe80') || l.startsWith('fc') || l.startsWith('fd') || l.startsWith('ff') || l.startsWith('::ffff:');
 }
 async function hostIsPublic(hostname) {
   const h = hostname.toLowerCase();
@@ -734,12 +798,21 @@ async function hostIsPublic(hostname) {
     return addrs.length > 0 && addrs.every((a) => !isPrivateIp(a.address));
   } catch { return false; }
 }
+function decodeEntities(s) {
+  return String(s).replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (m, e) => {
+    const l = e.toLowerCase();
+    if (l === 'amp') return '&'; if (l === 'lt') return '<'; if (l === 'gt') return '>';
+    if (l === 'quot') return '"'; if (l === 'apos') return "'"; if (l === 'nbsp') return ' ';
+    const code = l.startsWith('#x') ? parseInt(l.slice(2), 16) : parseInt(l.slice(1), 10);
+    return code > 0 && code < 0x110000 ? String.fromCodePoint(code) : m;
+  });
+}
 function ogTag(html, prop) {
   const re = new RegExp('<meta[^>]+(?:property|name)=["\']' + prop + '["\'][^>]*>', 'i');
   const tag = html.match(re);
   if (!tag) return null;
-  const c = tag[0].match(/content=["']([^"']*)["']/i);
-  return c ? c[1].trim() : null;
+  const c = tag[0].match(/content=(?:"([^"]*)"|'([^']*)')/i);
+  return c ? (c[1] != null ? c[1] : c[2]).trim() : null;
 }
 app.get('/api/link-preview', async (req, res) => {
   const user = userByToken(req);
@@ -753,10 +826,23 @@ app.get('/api/link-preview', async (req, res) => {
   if (cached && cached.exp > Date.now()) return res.json(cached.data);
   if (!(await hostIsPublic(url.hostname))) return res.status(403).json({ error: 'private host' });
   try {
-    const r = await fetch(url.href, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; VecheBot/1.0; +link-preview)', 'Accept': 'text/html' },
-      redirect: 'follow', signal: AbortSignal.timeout(6000),
-    });
+    // редиректы проходим вручную и проверяем КАЖДЫЙ адрес: иначе публичная ссылка могла
+    // перенаправить сервер во внутреннюю сеть (169.254.169.254, localhost и т.п.)
+    let target = url, r = null;
+    for (let hop = 0; hop < 4; hop++) {
+      r = await fetch(target.href, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; VecheBot/1.0; +link-preview)', 'Accept': 'text/html' },
+        redirect: 'manual', signal: AbortSignal.timeout(6000),
+      });
+      if (r.status < 300 || r.status >= 400) break;
+      const loc = r.headers.get('location');
+      if (!loc) break;
+      let next; try { next = new URL(loc, target.href); } catch { return res.json({ url: url.href, host: url.hostname }); }
+      if ((next.protocol !== 'http:' && next.protocol !== 'https:') || !(await hostIsPublic(next.hostname)))
+        return res.json({ url: url.href, host: url.hostname });
+      target = next; r = null;
+    }
+    if (!r) return res.json({ url: url.href, host: url.hostname });
     const ctype = r.headers.get('content-type') || '';
     if (!r.ok || !ctype.includes('text/html')) return res.json({ url: url.href, host: url.hostname });
     // читаем не более ~256 КБ
@@ -777,7 +863,12 @@ app.get('/api/link-preview', async (req, res) => {
       image: ogTag(html, 'og:image') || null,
       siteName: ogTag(html, 'og:site_name') || null,
     };
-    if (data.image) { try { data.image = new URL(data.image, url.href).href; } catch { data.image = null; } }
+    if (data.image) {
+      try { const iu = new URL(data.image, target.href); data.image = (iu.protocol === 'https:' || iu.protocol === 'http:') ? iu.href : null; }
+      catch { data.image = null; }
+    }
+    // декодируем базовые HTML-сущности (&amp; &quot; &#39; …), чтобы в карточке не было «&amp;»
+    for (const k of ['title', 'description', 'siteName']) if (data[k]) data[k] = decodeEntities(data[k]);
     linkCache.set(url.href, { data, exp: Date.now() + 6 * 3600 * 1000 });
     if (linkCache.size > 500) linkCache.delete(linkCache.keys().next().value);
     res.json(data);
@@ -850,6 +941,9 @@ function chatsFor(user) {
   // EFIR
   result.push(chatMeta(EFIR, user));
   seen.add(EFIR);
+  // «Избранное» — личка с самим собой: заметки, ссылки, пересланное себе
+  const saved = dmId(user.id, user.id);
+  result.push(chatMeta(saved, user)); seen.add(saved);
   // закреплённый чат с Алисой (ИИ-ассистент) — всегда доступен
   if (ALISA && user.id !== ALISA.id) {
     const aid = dmId(user.id, ALISA.id);
@@ -861,7 +955,7 @@ function chatsFor(user) {
   }
   // ЛС с историей
   for (const m of db.messages) {
-    if (m.chatId.startsWith('dm:') && m.chatId.includes(user.id) && !seen.has(m.chatId)) {
+    if (m.chatId.startsWith('dm:') && !seen.has(m.chatId) && canSee(user, m.chatId)) {
       result.push(chatMeta(m.chatId, user)); seen.add(m.chatId);
     }
   }
@@ -883,15 +977,15 @@ function chatMeta(chatId, user) {
     meta.membersCount = c.members.length;
   } else if (chatId.startsWith('dm:')) {
     meta.kind = 'dm';
-    const [, a, b] = chatId.split(':');
-    meta.peerId = a === user.id ? b : a;
+    meta.peerId = dmPeer(chatId, user.id);
+    if (meta.peerId === user.id) meta.saved = true;
   } else { meta.kind = 'efir'; }
   return meta;
 }
 
 function roomTargets(chatId) {
   if (chatId === EFIR) return null; // EFIR room
-  if (chatId.startsWith('dm:')) { const [, a, b] = chatId.split(':'); return [a, b]; }
+  if (chatId.startsWith('dm:')) { const [a, b] = dmParts(chatId); return a === b ? [a] : [a, b]; }
   const c = findChat(chatId);
   if (!c) return [];
   const set = new Set([...c.members, ...(c.subscribers || []), ...c.admins, c.owner]);
@@ -904,6 +998,18 @@ function emitToChat(chatId, event, payload) {
 
 io.on('connection', (socket) => {
   const me = socket.user;
+  // Любое исключение в обработчике раньше роняло весь сервер (достаточно было прислать событие без данных).
+  // Оборачиваем все обработчики: ошибка логируется, соединение и процесс живут дальше.
+  const rawOn = socket.on.bind(socket);
+  socket.on = (event, handler) => rawOn(event, (...args) => {
+    if (args[0] === undefined || args[0] === null) args[0] = {};
+    try {
+      const r = handler(...args);
+      if (r && typeof r.catch === 'function') r.catch((e) => console.error(`socket ${event}:`, e.message));
+    } catch (e) { console.error(`socket ${event}:`, e.message); }
+  });
+  // простая защита от флуда служебными событиями (жалобы, звонки, опросы)
+  const evLimit = (key, max, windowMs) => rateLimit(me.id, 'ev:' + key, max, windowMs);
   if (!sockets.has(me.id)) sockets.set(me.id, new Set());
   sockets.get(me.id).add(socket.id);
   recomputeOnline();
@@ -921,12 +1027,17 @@ io.on('connection', (socket) => {
     iceServers: iceServers(),
   });
 
-  socket.on('history', ({ chatId }, cb) => {
+  // история: последние PAGE сообщений; before=<id> — страница более старых (подгрузка при прокрутке вверх)
+  socket.on('history', ({ chatId, before }, cb) => {
     if (typeof cb !== 'function') return;
-    if (!canSee(me, chatId)) return cb({ error: 'no access' });
-    const msgs = db.messages.filter((m) => m.chatId === chatId).slice(-400);
+    chatId = normChatId(me, chatId);
+    if (!chatId || !canSee(me, chatId)) return cb({ error: 'no access' });
+    const PAGE = 150;
+    let all = db.messages.filter((m) => m.chatId === chatId);
+    if (before) { const i = all.findIndex((m) => m.id === before); if (i >= 0) all = all.slice(0, i); }
+    const msgs = all.slice(-PAGE);
     const c = chatId.startsWith('dm:') || chatId === EFIR ? null : findChat(chatId);
-    cb({ msgs, chat: c ? publicChat(c) : null });
+    cb({ chatId, msgs, hasMore: all.length > msgs.length, chat: c ? publicChat(c) : null });
   });
 
   // ---- отправка ----
@@ -936,11 +1047,18 @@ io.on('connection', (socket) => {
   });
 
   // ---- редактирование ----
-  socket.on('edit', ({ id, text }) => {
+  socket.on('edit', ({ id, text }, cb) => {
+    const done = (r) => typeof cb === 'function' && cb(r);
     const m = db.messages.find((x) => x.id === id);
-    if (!m || m.from !== me.id || m.deleted) return;
-    if (m.type !== 'text') return;
-    m.text = sanitize(text, 4000); m.edited = true;
+    if (!m || m.from !== me.id || m.deleted) return done({ error: 'нельзя' });
+    if (m.type !== 'text') return done({ error: 'нельзя' });
+    const next = sanitize(text, 4000);
+    if (!next) return done({ error: 'Пустое сообщение' });
+    // правка проходит тот же фильтр, что и отправка — иначе запрещёнку можно было «вписать» задним числом
+    const banned = moderate(next);
+    if (banned) return done({ error: banned });
+    m.text = next; m.edited = true;
+    done({ ok: true });
     save();
     emitToChat(m.chatId, 'edited', { id: m.id, text: m.text });
   });
@@ -952,7 +1070,7 @@ io.on('connection', (socket) => {
     const chat = m.chatId.startsWith('dm:') || m.chatId === EFIR ? null : findChat(m.chatId);
     const allowed = m.from === me.id || (chat && isAdmin(chat, me.id));
     if (!allowed) return;
-    m.deleted = true; m.text = ''; m.media = null; m.reactions = {};
+    m.deleted = true; m.text = ''; m.media = null; m.reactions = {}; m.pinned = false;
     save();
     emitToChat(m.chatId, 'deleted', { id: m.id, chatId: m.chatId });
   });
@@ -973,17 +1091,23 @@ io.on('connection', (socket) => {
   });
 
   // ---- закрепить ----
+  // закреплять/откреплять: в личке — оба, в группе/канале — админы, в Эфире — только администратор сервера
+  const canPin = (chatId) => {
+    if (!canSee(me, chatId)) return false;
+    if (chatId === EFIR) return isSuperAdmin(me);
+    if (chatId.startsWith('dm:')) return true;
+    const chat = findChat(chatId);
+    return !!chat && isAdmin(chat, me.id);
+  };
   socket.on('pin', ({ id }) => {
     const m = db.messages.find((x) => x.id === id);
-    if (!m || !canSee(me, m.chatId)) return;
-    const chat = m.chatId.startsWith('dm:') || m.chatId === EFIR ? null : findChat(m.chatId);
-    if (chat && !isAdmin(chat, me.id)) return;
+    if (!m || m.deleted || !canPin(m.chatId)) return;
     for (const x of db.messages) if (x.chatId === m.chatId) x.pinned = false;
     m.pinned = true; save();
     emitToChat(m.chatId, 'pinned', { id: m.id, chatId: m.chatId });
   });
   socket.on('unpin', ({ chatId }) => {
-    if (!canSee(me, chatId)) return;
+    if (!canPin(chatId)) return;
     for (const x of db.messages) if (x.chatId === chatId) x.pinned = false;
     save();
     emitToChat(chatId, 'pinned', { id: null, chatId });
@@ -991,11 +1115,12 @@ io.on('connection', (socket) => {
 
   // ---- typing ----
   socket.on('typing', ({ chatId }) => {
-    if (!canSend(me, chatId)) return;
+    chatId = normChatId(me, chatId);
+    if (!chatId || !canSend(me, chatId)) return;
     if (chatId === EFIR) socket.to(EFIR).emit('typing', { chatId: EFIR, userId: me.id, name: me.displayName });
     else if (chatId.startsWith('dm:')) {
-      const [, a, b] = chatId.split(':'); const peer = a === me.id ? b : a;
-      io.to(peer).emit('typing', { chatId: 'dm:' + me.id, userId: me.id, name: me.displayName });
+      const peer = dmPeer(chatId, me.id);
+      if (peer !== me.id) io.to(peer).emit('typing', { chatId: 'dm:' + me.id, userId: me.id, name: me.displayName });
     } else {
       for (const u of roomTargets(chatId)) if (u !== me.id) io.to(u).emit('typing', { chatId, userId: me.id, name: me.displayName });
     }
@@ -1003,7 +1128,8 @@ io.on('connection', (socket) => {
 
   // ---- прочитано ----
   socket.on('read', ({ chatId }) => {
-    if (!canSee(me, chatId)) return;
+    chatId = normChatId(me, chatId);
+    if (!chatId || !canSee(me, chatId)) return;
     let changed = false; const senders = new Set();
     for (const m of db.messages)
       if (m.chatId === chatId && m.from !== me.id && !m.readBy.includes(me.id)) {
@@ -1014,7 +1140,9 @@ io.on('connection', (socket) => {
 
   // ---- мут ----
   socket.on('mute', ({ chatId, on }) => {
-    if (on) { if (!me.muted.includes(chatId)) me.muted.push(chatId); }
+    chatId = normChatId(me, chatId);
+    if (!chatId || !canSee(me, chatId)) return;
+    if (on) { if (!me.muted.includes(chatId) && me.muted.length < 1000) me.muted.push(chatId); }
     else me.muted = me.muted.filter((c) => c !== chatId);
     save();
     socket.emit('muted', { chatId, on: me.muted.includes(chatId) });
@@ -1024,8 +1152,9 @@ io.on('connection', (socket) => {
   socket.on('createChat', ({ type, title, members, description }, cb) => {
     type = type === 'channel' ? 'channel' : 'group';
     title = sanitize(title, 48);
+    if (!evLimit('createChat', 10, 60000)) return cb && cb({ error: 'Слишком часто — подожди минуту' });
     if (!title) return cb && cb({ error: 'Нужно название' });
-    const mem = Array.isArray(members) ? members.filter((id) => findUser(id)) : [];
+    const mem = Array.isArray(members) ? members.filter((id) => isUserId(id) && id !== me.id).slice(0, 500) : [];
     const chat = {
       id: (type === 'channel' ? 'chn:' : 'grp:') + uid(),
       type, title, description: sanitize(description, 200), avatar: null,
@@ -1058,7 +1187,7 @@ io.on('connection', (socket) => {
   socket.on('addMembers', ({ chatId, members }, cb) => {
     const c = findChat(chatId);
     if (!c || !isAdmin(c, me.id)) return cb && cb({ error: 'нет прав' });
-    const list = (members || []).filter((id) => findUser(id));
+    const list = (Array.isArray(members) ? members : []).filter((id) => isUserId(id)).slice(0, 500);
     const arr = c.type === 'channel' ? c.subscribers : c.members;
     for (const id of list) if (!arr.includes(id)) {
       arr.push(id);
@@ -1087,6 +1216,8 @@ io.on('connection', (socket) => {
   socket.on('setAdmin', ({ chatId, userId, on }, cb) => {
     const c = findChat(chatId);
     if (!c || c.owner !== me.id) return cb && cb({ error: 'только владелец' });
+    const inChat = c.members.includes(userId) || (c.subscribers || []).includes(userId);
+    if (on && !inChat) return cb && cb({ error: 'не участник' });
     if (on) { if (!c.admins.includes(userId)) c.admins.push(userId); }
     else c.admins = c.admins.filter((id) => id !== userId);
     save(); broadcastChat(c);
@@ -1099,7 +1230,14 @@ io.on('connection', (socket) => {
     c.members = c.members.filter((id) => id !== me.id);
     c.subscribers = (c.subscribers || []).filter((id) => id !== me.id);
     c.admins = c.admins.filter((id) => id !== me.id);
-    if (c.owner === me.id) c.owner = c.admins[0] || c.members[0] || null;
+    if (c.owner === me.id) {
+      // владение переходит админу, затем участнику, затем (для канала) первому подписчику
+      c.owner = c.admins[0] || c.members[0] || (c.subscribers || [])[0] || null;
+      if (c.owner && !c.admins.includes(c.owner)) c.admins.push(c.owner);
+      if (c.owner && c.type === 'channel' && !c.members.includes(c.owner)) {
+        c.members.push(c.owner); c.subscribers = c.subscribers.filter((id) => id !== c.owner);
+      }
+    }
     save();
     socket.emit('chat_removed', { chatId });
     if (!c.members.length && !c.subscribers.length) db.chats = db.chats.filter((x) => x.id !== c.id);
@@ -1116,7 +1254,8 @@ io.on('connection', (socket) => {
   // ---- ЗВОНКИ (WebRTC сигналинг, 1:1) ----
   socket.on('getIce', (a, b) => { const cb = typeof a === 'function' ? a : b; if (typeof cb === 'function') cb(iceServers()); });
   socket.on('call:offer', ({ to, sdp, video }) => {
-    const peer = findUser(to); if (!peer) return;
+    if (!isUserId(to) || to === me.id || !evLimit('call', 20, 60000)) return;
+    const peer = findUser(to);
     if (peer.blocked && peer.blocked.includes(me.id)) { socket.emit('call:declined', { from: to, reason: 'недоступен' }); return; }
     // Сохраняем входящий звонок — нужен если получатель откроет приложение позже
     const callData = { from: me.id, name: me.displayName, avatar: me.avatar || null, colors: me.colors, sdp, video: !!video, ts: Date.now() };
@@ -1129,29 +1268,36 @@ io.on('connection', (socket) => {
     }
   });
   socket.on('call:answer', ({ to, sdp }) => {
+    if (!isUserId(to)) return;
     pendingCalls.delete(me.id); // я ответил — убираем pending
     io.to(to).emit('call:answered', { from: me.id, sdp });
   });
-  socket.on('call:ice', ({ to, candidate }) => io.to(to).emit('call:ice', { from: me.id, candidate }));
+  socket.on('call:ice', ({ to, candidate }) => { if (isUserId(to)) io.to(to).emit('call:ice', { from: me.id, candidate }); });
   socket.on('call:decline', ({ to }) => {
+    if (!isUserId(to)) return;
     pendingCalls.delete(me.id); // я отклонил
     io.to(to).emit('call:declined', { from: me.id });
   });
   socket.on('call:end', ({ to }) => {
+    if (!isUserId(to)) return;
     pendingCalls.delete(me.id); pendingCalls.delete(to);
     io.to(to).emit('call:ended', { from: me.id });
   });
   socket.on('call:cancel', ({ to }) => {
+    if (!isUserId(to)) return;
     pendingCalls.delete(to); // вызывающий отменил — убираем pending у получателя
     io.to(to).emit('call:canceled', { from: me.id });
   });
 
   // ---- ИГРЫ (в личке, как сообщение) ----
   socket.on('game:create', ({ chatId, type, wins }, cb) => {
-    let cid = chatId;
-    if (cid && cid.startsWith('dm:') && cid.split(':').length === 2) cid = dmId(me.id, cid.slice(3));
-    if (!cid || !cid.startsWith('dm:') || !cid.includes(me.id)) return cb && cb({ error: 'Игры только в личке' });
-    const [, a, b] = cid.split(':'); const peer = a === me.id ? b : a;
+    const cid = normChatId(me, chatId);
+    if (!cid || !cid.startsWith('dm:')) return cb && cb({ error: 'Игры только в личке' });
+    const peer = dmPeer(cid, me.id);
+    if (peer === me.id) return cb && cb({ error: 'Сыграть с собой не выйдет 🙂' });
+    const peerUser = findUser(peer);
+    if (peerUser.isBot) return cb && cb({ error: 'С ботом не поиграть' });
+    if (peerUser.blocked.includes(me.id)) return cb && cb({ error: 'Вы заблокированы' });
     type = ['ttt', 'rps', 'c4', 'dice'].includes(type) ? type : 'ttt';
     const target = [1, 2, 3, 5].includes(Number(wins)) ? Number(wins) : 1;
     const msg = {
@@ -1234,10 +1380,10 @@ io.on('connection', (socket) => {
 
   // ---- индикатор «стирает…» ----
   socket.on('erasing', ({ chatId }) => {
-    if (chatId && chatId.startsWith('dm:') && chatId.split(':').length === 2) chatId = dmId(me.id, chatId.slice(3));
-    if (!canSee(me, chatId)) return;
+    chatId = normChatId(me, chatId);
+    if (!chatId || !canSee(me, chatId)) return;
     if (chatId === EFIR) socket.to(EFIR).emit('erasing', { chatId: EFIR, userId: me.id, name: me.displayName });
-    else if (chatId.startsWith('dm:')) { const [, a, b] = chatId.split(':'); const peer = a === me.id ? b : a; io.to(peer).emit('erasing', { chatId: 'dm:' + me.id, userId: me.id, name: me.displayName }); }
+    else if (chatId.startsWith('dm:')) { const peer = dmPeer(chatId, me.id); if (peer !== me.id) io.to(peer).emit('erasing', { chatId: 'dm:' + me.id, userId: me.id, name: me.displayName }); }
     else for (const u of roomTargets(chatId)) if (u !== me.id) io.to(u).emit('erasing', { chatId, userId: me.id, name: me.displayName });
   });
 
@@ -1245,15 +1391,20 @@ io.on('connection', (socket) => {
   socket.on('vote', ({ id, option }) => {
     const m = db.messages.find((x) => x.id === id);
     if (!m || m.type !== 'poll' || m.deleted || !canSee(me, m.chatId)) return;
+    // голос — только индекс существующего варианта (раньше '__proto__' в option ронял сервер)
+    const idx = Number(option);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= m.media.options.length) return;
     const v = m.media.votes;
+    const had = Array.isArray(v[idx]) && v[idx].includes(me.id);
     for (const k of Object.keys(v)) v[k] = v[k].filter((u) => u !== me.id);
-    if (v[option]) v[option].push(me.id); else v[option] = [me.id];
+    if (!had) (v[idx] = v[idx] || []).push(me.id);   // повторный тап по своему варианту — отмена голоса
     save();
     emitToChat(m.chatId, 'voted', { id: m.id, votes: m.media.votes });
   });
 
   // ---- жалоба ----
   socket.on('report', ({ targetType, targetId, reason }) => {
+    if (!evLimit('report', 10, 600000)) return;
     const rep = { id: uid(), by: me.id, byName: me.displayName, targetType: sanitize(targetType, 16), targetId: sanitize(targetId, 64), reason: sanitize(reason, 200), ts: Date.now(), status: 'open' };
     db.reports.push(rep); save();
     socket.emit('reported');
@@ -1268,7 +1419,8 @@ io.on('connection', (socket) => {
     }
   });
   socket.on('reportMsg', ({ id, reason }) => {
-    const m = db.messages.find((x) => x.id === id); if (!m) return;
+    if (!evLimit('report', 10, 600000)) return;
+    const m = db.messages.find((x) => x.id === id); if (!m || !canSee(me, m.chatId)) return;
     const author = findUser(m.from);
     const rep = { id: uid(), by: me.id, byName: me.displayName, targetType: 'msg', targetId: id, authorId: m.from, reason: sanitize(reason, 200), excerpt: (m.text || m.type).slice(0, 80), ts: Date.now(), status: 'open' };
     db.reports.push(rep); save();
@@ -1292,6 +1444,8 @@ io.on('connection', (socket) => {
     const u = findUser(userId); if (!u || isSuperAdmin(u)) return cb && cb({ error: 'нельзя' });
     u.banned = !!on; if (on) u.token = null; save();
     io.to(userId).emit('banned_notice', { banned: !!on });
+    // выкидываем уже открытые сессии — иначе забаненный продолжал писать до перезагрузки страницы
+    if (on) setTimeout(() => io.in(userId).disconnectSockets(true), 300);
     cb && cb({ ok: true, banned: u.banned });
   });
   socket.on('dismissReport', ({ id }, cb) => {
@@ -1302,7 +1456,7 @@ io.on('connection', (socket) => {
   socket.on('deleteAnyMsg', ({ id }, cb) => {
     if (!isSuperAdmin(me)) return cb && cb({ error: 'нет прав' });
     const m = db.messages.find((x) => x.id === id); if (!m) return cb && cb({ error: 'нет' });
-    m.deleted = true; m.text = ''; m.media = null; save();
+    m.deleted = true; m.text = ''; m.media = null; m.reactions = {}; m.pinned = false; save();
     emitToChat(m.chatId, 'deleted', { id: m.id, chatId: m.chatId });
     cb && cb({ ok: true });
   });
@@ -1331,6 +1485,8 @@ io.on('connection', (socket) => {
     cb && cb(page.map((p) => publicPost(p, me.id)));
   });
   socket.on('wall', ({ userId }, cb) => {
+    const author = findUser(userId);
+    if (!author || author.blocked.includes(me.id) || me.blocked.includes(userId)) return cb && cb([]);
     const posts = db.posts.filter((p) => p.author === userId).sort((a, b) => b.ts - a.ts);
     let changed = false;
     for (const p of posts) if (countView(p, me.id)) changed = true;
@@ -1452,22 +1608,15 @@ function doSend(me, p) {
   const sp = spamCheck(me.id, text);
   if (sp.blocked) return { error: sp.reason };
 
-  // нормализация chatId
-  let chatId = p.chatId;
-  if (chatId && chatId.startsWith('dm:')) {
-    const peerId = chatId.slice(3);
-    if (findUser(peerId)) chatId = dmId(me.id, peerId);
-  } else if (chatId && chatId.startsWith('peer:')) {
-    const peerId = chatId.slice(5);
-    if (findUser(peerId)) chatId = dmId(me.id, peerId);
-  }
-  if (!canSend(me, chatId)) return { error: 'no access' };
+  // нормализация chatId (строгая: только существующие чаты и собеседники)
+  const chatId = normChatId(me, p.chatId);
+  if (!chatId || !canSend(me, chatId)) return { error: 'no access' };
   // сквозное шифрование — только в личке 1-на-1 (для групп нужен другой протокол)
   if (type === 'e2e' && !chatId.startsWith('dm:')) return { error: 'Секретные сообщения — только в личке' };
 
   // приватность: закрытый профиль — чужой не пишет первым
-  if (chatId.startsWith('dm:')) {
-    const [, a, b] = chatId.split(':'); const peerId = a === me.id ? b : a;
+  const peerId = chatId.startsWith('dm:') ? dmPeer(chatId, me.id) : null;
+  if (peerId && peerId !== me.id) {   // peerId === me.id — «Избранное», сам себе пишешь без ограничений
     const peer = findUser(peerId);
     if (peer && peer.privacy && peer.privacy.closed) {
       const known = peer.contacts.includes(me.id) ||
@@ -1514,11 +1663,11 @@ function doSend(me, p) {
   return { ok: true, msg };
 }
 
-function scheduleBurn(msg) {
+function scheduleBurn(msg, delayMs) {
   setTimeout(() => {
     const m = db.messages.find((x) => x.id === msg.id);
-    if (m && !m.deleted) { m.deleted = true; m.text = ''; m.media = null; save(); emitToChat(m.chatId, 'deleted', { id: m.id, chatId: m.chatId }); }
-  }, msg.ttl * 1000);
+    if (m && !m.deleted) { m.deleted = true; m.text = ''; m.media = null; m.reactions = {}; save(); emitToChat(m.chatId, 'deleted', { id: m.id, chatId: m.chatId }); }
+  }, delayMs != null ? delayMs : msg.ttl * 1000);
 }
 
 // доставка отложенных
@@ -1529,17 +1678,22 @@ setInterval(() => {
   db.scheduled = db.scheduled.filter((m) => m.scheduledFor > now);
   for (const m of due) {
     delete m.scheduledFor;
+    m.ts = now;   // время сообщения — момент фактической отправки, иначе оно «проваливается» вверх истории
     db.messages.push(m);
     emitToChat(m.chatId, 'message', m);
     if (m.ttl) scheduleBurn(m);
+    const sender = findUser(m.from);
+    if (sender) notifyOffline(m, sender).catch(() => {});
   }
   save();
 }, 4000);
 
-// перезапуск таймеров самоуничтожения после рестарта (приблизительно)
+// перезапуск таймеров самоуничтожения после рестарта: просроченные удаляем сразу,
+// остальным заводим таймер на оставшееся время (раньше они после рестарта жили вечно)
 for (const m of db.messages) if (m.ttl && !m.deleted) {
-  const age = (Date.now() - m.ts) / 1000;
-  if (age >= m.ttl) { m.deleted = true; m.text = ''; m.media = null; }
+  const leftMs = m.ts + m.ttl * 1000 - Date.now();
+  if (leftMs <= 0) { m.deleted = true; m.text = ''; m.media = null; m.reactions = {}; }
+  else scheduleBurn(m, leftMs);
 }
 
 server.listen(PORT, '0.0.0.0', () => {

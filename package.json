@@ -1,6 +1,6 @@
 {
   "name": "veche",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "ВЕЧЕ — свободный мессенджер. Собрание, которое не разогнать.",
   "main": "server.js",
   "type": "commonjs",
@@ -31,5 +31,8 @@
     "express": "^4.19.2",
     "socket.io": "^4.7.5",
     "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3"
   }
 }
